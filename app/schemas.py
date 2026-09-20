@@ -100,6 +100,35 @@ class PropagationRequest(BaseModel):
     )
 
 
+class OutputFormula(BaseModel):
+    """联合传播请求中的一个具名输出公式。"""
+
+    name: str = Field(
+        ...,
+        min_length=1,
+        max_length=64,
+        pattern=r"^[A-Za-z_][A-Za-z0-9_]*$",
+        description="输出名称（Python 标识符），同一请求内不得重复",
+    )
+    formula: str = Field(..., min_length=1, description="仅含白名单运算的测量公式")
+
+
+class JointPropagationRequest(BaseModel):
+    """多输出联合传播请求：2～8 个具名输出共用同一组输入量与相关矩阵。"""
+
+    inputs: list[InputQuantity] = Field(..., min_length=1)
+    outputs: list[OutputFormula] = Field(
+        ...,
+        min_length=2,
+        max_length=8,
+        description="2～8 个具名输出公式，按同一输入协方差做一阶雅可比传播",
+    )
+    correlation_matrix: list[list[FiniteFloat]] | None = Field(
+        default=None,
+        description="输入量相关系数矩阵，顺序与 inputs 一致；缺省为单位阵（互不相关）",
+    )
+
+
 class TargetUncertainty(BaseModel):
     """带单位的目标合成标准不确定度。"""
 
@@ -204,3 +233,42 @@ class AllocationResponse(PropagationResponse):
         ..., description="回显目标合成标准不确定度（值/单位）"
     )
     variance_quadratic: VarianceQuadraticCoefficients
+
+
+class JointOutputResult(BaseModel):
+    """联合传播中的一个输出：值、单位、合成标准不确定度与对各输入量的灵敏度系数。"""
+
+    name: str
+    result: QuantityResult
+    sensitivity_coefficients: list[SensitivityCoefficient]
+    formula: str
+
+
+class CovarianceCell(BaseModel):
+    """输出协方差矩阵的一个单元：数值（Cov[i,j]）与单位（输出i单位×输出j单位）。"""
+
+    value: float
+    unit: str = Field(..., description="协方差单元单位：输出i单位 × 输出j单位")
+
+
+class JointPropagationResponse(BaseModel):
+    """多输出联合传播结果：各输出值/单位/不确定度及完整输出相关系数矩阵。"""
+
+    outputs: list[JointOutputResult]
+    number_of_inputs: int = Field(..., description="参与传播的输入量数量")
+    number_of_outputs: int = Field(..., description="参与联合传播的输出数量")
+    correlation_matrix: list[list[float]] = Field(
+        ..., description="回显输入量相关系数矩阵（顺序与 inputs 一致）"
+    )
+    output_correlation_matrix: list[list[float]] = Field(
+        ...,
+        description=(
+            "完整的输出量相关系数矩阵（m×m，对称、对角为 1）；"
+            "某输出方差为 0 导致相关系数无定义时，相应单元记为 0"
+        ),
+    )
+    output_covariance_matrix: list[list[CovarianceCell]] = Field(
+        ...,
+        description="输出协方差矩阵 JΣJᵀ（m×m）；每单元带数值与“输出i单位×输出j单位”",
+    )
+    whitelist: list[str]
