@@ -4,16 +4,23 @@
 服务端解析仅含白名单运算的公式并进行量纲校验，利用符号偏导与相关系数矩阵计算结果值、
 单位、合成标准不确定度，并按输入量列出含相关项的方差贡献。
 
+另提供**多输出联合传播**接口：对同一组输入量与同一输入协方差，按一阶雅可比计算
+$C=J\Sigma J^{T}$，一次返回 2～8 个输出量的值、单位、合成标准不确定度、完整输出
+协方差矩阵与输出相关系数矩阵。
+
 另提供**不确定度逆分配**接口：把某个输入量的标准不确定度视为未知量，在完整保留相关项
 的前提下反求满足目标合成标准不确定度的最大允许取值。
 
 ## 启动
 
+单条命令一键启动（Docker Compose）：
+
 ```bash
 docker compose up --build
 ```
 
-依赖在**容器启动时**安装；服务随后监听 API 端口 **8000**。
+依赖在**容器启动时**安装；服务随后监听 API 端口 **8000**（交互文档
+`http://localhost:8000/docs`）。
 
 ## 配置
 
@@ -26,8 +33,69 @@ docker compose up --build
 - `GET /health` — 健康检查
 - `GET /api/v1/whitelist` — 公式白名单
 - `POST /api/v1/propagate` — 不确定度传播；相关矩阵非对称 / 非半正定 / 单位量纲不兼容 / 公式不合法时返回 **422**，错误体 `error.loc` 精确定位（如 `correlation_matrix.0.1`、`inputs.0.unit`、`formula`）
+- `POST /api/v1/propagate-joint` — 多输出联合传播（见下）
 - `POST /api/v1/allocate-uncertainty` — 不确定度逆分配（见下）
 - 交互文档：`http://localhost:8000/docs`
+
+### 多输出联合传播 `POST /api/v1/propagate-joint`
+
+请求体在 `/api/v1/propagate` 的基础上把单个 `formula` 换成 2～8 个**具名输出公式**
+`outputs: [{name, formula}, ...]`；输入量、公式白名单、单位与相关矩阵校验完全复用
+单输出接口。设 $J_{ki}=\partial f_k/\partial x_i$ 在输入估计值处取值，输入协方差
+$\Sigma=DRD$（$D=\mathrm{diag}(u(x_i))$，$R$ 为输入相关系数矩阵），服务端按一阶
+雅可比计算输出协方差矩阵：
+
+$$
+C=J\Sigma J^{T},\qquad
+C_{kl}=\sum_{i}\sum_{j}c_i^{(k)}u(x_i)\,r_{ij}\,u(x_j)c_j^{(l)}
+$$
+
+对角元即各输出量的合成方差 $u_c(y_k)^2$。响应返回每个输出的值、单位、合成标准
+不确定度，以及：
+
+- `output_covariance_matrix` — 完整输出协方差矩阵，每个单元给出数值与单位
+  （**输出 i 单位 × 输出 j 单位**，如 `Ω * W`）；
+- `output_correlation_matrix` — 输出相关系数矩阵 $C_{kl}/\big(u_c(y_k)u_c(y_l)\big)$
+  （某输出标准不确定度为 0 时其非对角相关系数无定义，置 0）；
+- `sensitivity_coefficients` — 每个输出对各输入量的灵敏度系数（即雅可比各行）。
+
+请求示例（$P=U\cdot I$、$R=U/I$ 联合传播，$r(U,I)=0.5$）：
+
+```bash
+curl -s http://localhost:8000/api/v1/propagate-joint \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "inputs": [
+      {"name": "U", "value": 10.0, "unit": "V", "standard_uncertainty": 0.1},
+      {"name": "I", "value": 2.0, "unit": "A", "standard_uncertainty": 0.05}
+    ],
+    "outputs": [
+      {"name": "P", "formula": "U*I"},
+      {"name": "R", "formula": "U/I"}
+    ],
+    "correlation_matrix": [[1.0, 0.5], [0.5, 1.0]]
+  }'
+```
+
+响应（节选）：
+
+```json
+{
+  "outputs": [
+    {"name": "P", "value": 20.0, "unit": "W", "standard_uncertainty": 0.6244997998398398},
+    {"name": "R", "value": 5.0, "unit": "Ω", "standard_uncertainty": 0.10897247358851683}
+  ],
+  "output_covariance_matrix": [
+    [{"value": 0.39, "unit": "W ** 2"},  {"value": -0.0525, "unit": "Ω * W"}],
+    [{"value": -0.0525, "unit": "Ω * W"}, {"value": 0.011875, "unit": "Ω ** 2"}]
+  ],
+  "output_correlation_matrix": [[1.0, -0.7714542762891773], [-0.7714542762891773, 1.0]]
+}
+```
+
+输出数量不在 2～8 范围、输出名重复或公式非法时返回 **422**，`error.loc` 精确定位
+（如 `outputs`、`outputs.1.name`、`outputs.1.formula`）；相关矩阵非法、单位量纲
+不兼容等沿用传播接口的同一套校验与 code/loc。
 
 ### 不确定度逆分配 `POST /api/v1/allocate-uncertainty`
 

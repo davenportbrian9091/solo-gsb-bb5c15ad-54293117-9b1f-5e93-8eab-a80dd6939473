@@ -7,10 +7,13 @@ from fastapi.exceptions import RequestValidationError
 from .allocation import allocate
 from .errors import UnprocessableError, request_validation_handler, unprocessable_handler
 from .formula import WHITELIST_DISPLAY
+from .joint import propagate_joint
 from .propagation import propagate
 from .schemas import (
     AllocationRequest,
     AllocationResponse,
+    JointPropagationRequest,
+    JointPropagationResponse,
     PropagationRequest,
     PropagationResponse,
 )
@@ -60,6 +63,18 @@ _ALLOC_EXAMPLE = {
     "target_combined_uncertainty": {"value": 0.5, "unit": "W"},
 }
 
+_JOINT_EXAMPLE = {
+    "inputs": [
+        {"name": "U", "value": 10.0, "unit": "V", "standard_uncertainty": 0.1},
+        {"name": "I", "value": 2.0, "unit": "A", "standard_uncertainty": 0.05},
+    ],
+    "outputs": [
+        {"name": "P", "formula": "U*I"},
+        {"name": "R", "formula": "U/I"},
+    ],
+    "correlation_matrix": [[1.0, 0.5], [0.5, 1.0]],
+}
+
 
 @app.post(
     "/api/v1/propagate",
@@ -73,6 +88,26 @@ _ALLOC_EXAMPLE = {
 def calculate(req: PropagationRequest) -> dict:
     """执行一次不确定度传播计算。"""
     return propagate(req)
+
+
+@app.post(
+    "/api/v1/propagate-joint",
+    response_model=JointPropagationResponse,
+    tags=["uncertainty"],
+    responses={
+        422: {
+            "description": (
+                "输出量名称重复、输出公式非法、相关矩阵非法或单位/量纲不兼容等"
+            )
+        }
+    },
+    openapi_extra={
+        "examples": {"欧姆定律 P=U*I 与 R=U/I 联合传播": {"value": _JOINT_EXAMPLE}},
+    },
+)
+def calculate_joint(req: JointPropagationRequest) -> dict:
+    """多输出联合传播：对同一输入协方差按一阶雅可比计算 JΣJᵀ，给出输出协方差与相关系数矩阵。"""
+    return propagate_joint(req)
 
 
 @app.post(

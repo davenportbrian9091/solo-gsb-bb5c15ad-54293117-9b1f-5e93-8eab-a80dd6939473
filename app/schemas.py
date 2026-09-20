@@ -100,6 +100,32 @@ class PropagationRequest(BaseModel):
     )
 
 
+class NamedFormula(BaseModel):
+    """一个具名输出公式（联合传播的输出量定义）。"""
+
+    name: str = Field(
+        ...,
+        min_length=1,
+        max_length=64,
+        pattern=r"^[A-Za-z_][A-Za-z0-9_]*$",
+        description="输出量名称（Python 标识符，须互不重复）",
+    )
+    formula: str = Field(..., min_length=1, description="仅含白名单运算的测量公式")
+
+
+class JointPropagationRequest(BaseModel):
+    """多输出联合传播请求：同一组输入量、同一相关矩阵，2～8 条输出公式。"""
+
+    inputs: list[InputQuantity] = Field(..., min_length=1)
+    outputs: list[NamedFormula] = Field(
+        ..., min_length=2, max_length=8, description="2～8 个具名输出公式"
+    )
+    correlation_matrix: list[list[FiniteFloat]] | None = Field(
+        default=None,
+        description="输入量相关系数矩阵，顺序与 inputs 一致；缺省为单位阵（互不相关）",
+    )
+
+
 class TargetUncertainty(BaseModel):
     """带单位的目标合成标准不确定度。"""
 
@@ -175,6 +201,48 @@ class PropagationResponse(BaseModel):
     total_variance: float
     total_variance_unit: str
     formula: str
+    whitelist: list[str]
+
+
+class JointOutputResult(BaseModel):
+    """单个输出量的结果：名称、值、单位、合成标准不确定度。"""
+
+    name: str
+    value: float
+    unit: str
+    standard_uncertainty: float
+
+
+class CovarianceCell(BaseModel):
+    """输出协方差矩阵单元：数值 + 单位（输出 i 单位 × 输出 j 单位）。"""
+
+    value: float
+    unit: str
+
+
+class OutputSensitivities(BaseModel):
+    """单个输出量对各输入量的灵敏度系数（雅可比矩阵的一行）。"""
+
+    output: str
+    coefficients: list[SensitivityCoefficient]
+
+
+class JointPropagationResponse(BaseModel):
+    outputs: list[JointOutputResult]
+    number_of_inputs: int = Field(..., description="参与传播的输入量数量")
+    number_of_outputs: int = Field(..., description="参与联合传播的输出量数量")
+    correlation_matrix: list[list[float]] = Field(
+        ..., description="输入量相关系数矩阵（回显，顺序与 inputs 一致）"
+    )
+    sensitivity_coefficients: list[OutputSensitivities]
+    output_covariance_matrix: list[list[CovarianceCell]] = Field(
+        ...,
+        description="输出协方差矩阵 JΣJᵀ；单元 (i,j) 的单位 = 输出 i 单位 × 输出 j 单位",
+    )
+    output_correlation_matrix: list[list[float]] = Field(
+        ...,
+        description="输出相关系数矩阵；某输出标准不确定度为 0 时其非对角相关系数无定义，置 0",
+    )
     whitelist: list[str]
 
 

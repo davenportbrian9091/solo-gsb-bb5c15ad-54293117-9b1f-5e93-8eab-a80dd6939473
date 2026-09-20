@@ -551,4 +551,194 @@ r = client.post(
 show("31) x=0 already above target -> 422", r.json())
 assert r.status_code == 422 and r.json()["error"]["code"] == "target_unreachable"
 
+# --- POST /api/v1/propagate-joint -------------------------------------------
+
+# 32) 联合传播 P=U*I 与 R=U/I，r=0.5
+#   P: cu=[0.2, 0.5]  -> Var=0.04+0.25+2*0.5*0.2*0.5=0.39
+#   R: cu=[0.05, -0.125] -> Var=0.0025+0.015625-2*0.5*0.05*0.125=0.011875
+#   Cov(P,R)=0.01-0.0125+0.0125-0.0625=-0.0525
+r = client.post(
+    "/api/v1/propagate-joint",
+    json={
+        "inputs": [
+            {"name": "U", "value": 10.0, "unit": "V", "standard_uncertainty": 0.1},
+            {"name": "I", "value": 2.0, "unit": "A", "standard_uncertainty": 0.05},
+        ],
+        "outputs": [
+            {"name": "P", "formula": "U*I"},
+            {"name": "R", "formula": "U/I"},
+        ],
+        "correlation_matrix": [[1.0, 0.5], [0.5, 1.0]],
+    },
+)
+show("32) joint P=U*I, R=U/I (Var_P=0.39, Var_R=0.011875, Cov=-0.0525)", r.json())
+assert r.status_code == 200, r.text
+b = r.json()
+assert b["number_of_inputs"] == 2 and b["number_of_outputs"] == 2
+assert b["outputs"][0] == {
+    "name": "P",
+    "value": 20.0,
+    "unit": "W",
+    "standard_uncertainty": 0.39 ** 0.5,
+}
+assert b["outputs"][1]["name"] == "R"
+assert abs(b["outputs"][1]["value"] - 5.0) < 1e-12
+assert abs(b["outputs"][1]["standard_uncertainty"] - 0.011875 ** 0.5) < 1e-12
+cov = b["output_covariance_matrix"]
+assert abs(cov[0][0]["value"] - 0.39) < 1e-12 and cov[0][0]["unit"] == "W ** 2"
+assert abs(cov[0][1]["value"] - (-0.0525)) < 1e-12
+assert abs(cov[1][0]["value"] - (-0.0525)) < 1e-12
+assert abs(cov[1][1]["value"] - 0.011875) < 1e-12
+oc = b["output_correlation_matrix"]
+assert oc[0][0] == 1.0 and oc[1][1] == 1.0
+expected_r = -0.0525 / (0.39 ** 0.5 * 0.011875 ** 0.5)
+assert abs(oc[0][1] - expected_r) < 1e-12 and abs(oc[1][0] - expected_r) < 1e-12
+# 每个输出的灵敏度系数（雅可比行）
+sens = {s["output"]: s["coefficients"] for s in b["sensitivity_coefficients"]}
+assert [c["value"] for c in sens["P"]] == [2.0, 10.0]
+assert [c["value"] for c in sens["R"]] == [0.5, -2.5]
+
+# 32b) 与单输出接口一致：联合对角元 = /propagate 的合成不确定度
+r1 = client.post(
+    "/api/v1/propagate",
+    json={
+        "inputs": [
+            {"name": "U", "value": 10.0, "unit": "V", "standard_uncertainty": 0.1},
+            {"name": "I", "value": 2.0, "unit": "A", "standard_uncertainty": 0.05},
+        ],
+        "formula": "U*I",
+        "correlation_matrix": [[1.0, 0.5], [0.5, 1.0]],
+    },
+)
+assert r1.status_code == 200
+assert abs(r1.json()["result"]["standard_uncertainty"] - b["outputs"][0]["standard_uncertainty"]) < 1e-15
+
+# 33) 输出名重复 -> 422 loc outputs/1/name
+r = client.post(
+    "/api/v1/propagate-joint",
+    json={
+        "inputs": [{"name": "x", "value": 1, "unit": "m", "standard_uncertainty": 0.1}],
+        "outputs": [{"name": "a", "formula": "x"}, {"name": "a", "formula": "x*2"}],
+    },
+)
+show("33) duplicate output name -> 422", r.json())
+assert r.status_code == 422
+assert r.json()["error"]["code"] == "duplicate_name"
+assert r.json()["error"]["loc"] == ["outputs", 1, "name"]
+
+# 34) 第二个输出公式非法（未声明符号）-> 422 loc outputs/1/formula
+r = client.post(
+    "/api/v1/propagate-joint",
+    json={
+        "inputs": [{"name": "x", "value": 1, "unit": "m", "standard_uncertainty": 0.1}],
+        "outputs": [{"name": "a", "formula": "x"}, {"name": "b", "formula": "x+y"}],
+    },
+)
+show("34) unknown symbol in output 1 -> 422", r.json())
+assert r.status_code == 422
+assert r.json()["error"]["code"] == "unknown_symbol"
+assert r.json()["error"]["loc"] == ["outputs", 1, "formula"]
+
+# 34b) 输出公式量纲不一致 -> 422 loc 同样精确定位
+r = client.post(
+    "/api/v1/propagate-joint",
+    json={
+        "inputs": [
+            {"name": "U", "value": 10.0, "unit": "V", "standard_uncertainty": 0.1},
+            {"name": "I", "value": 2.0, "unit": "A", "standard_uncertainty": 0.05},
+        ],
+        "outputs": [{"name": "P", "formula": "U*I"}, {"name": "bad", "formula": "U+I"}],
+    },
+)
+assert r.status_code == 422
+assert r.json()["error"]["code"] == "dimension_mismatch"
+assert r.json()["error"]["loc"] == ["outputs", 1, "formula"]
+
+# 35) 输出数量越界：1 个或 9 个 -> 422 loc outputs
+r = client.post(
+    "/api/v1/propagate-joint",
+    json={
+        "inputs": [{"name": "x", "value": 1, "unit": "m", "standard_uncertainty": 0.1}],
+        "outputs": [{"name": "a", "formula": "x"}],
+    },
+)
+show("35) single output -> 422", r.json())
+assert r.status_code == 422 and r.json()["error"]["loc"] == ["outputs"]
+r = client.post(
+    "/api/v1/propagate-joint",
+    json={
+        "inputs": [{"name": "x", "value": 1, "unit": "m", "standard_uncertainty": 0.1}],
+        "outputs": [{"name": f"y{k}", "formula": f"x*{k+1}"} for k in range(9)],
+    },
+)
+show("35b) nine outputs -> 422", r.json())
+assert r.status_code == 422 and r.json()["error"]["loc"] == ["outputs"]
+
+# 36) 8 个输出（上限）可正常计算
+r = client.post(
+    "/api/v1/propagate-joint",
+    json={
+        "inputs": [{"name": "x", "value": 2, "unit": "m", "standard_uncertainty": 0.1}],
+        "outputs": [{"name": f"y{k}", "formula": f"x*{k+1}"} for k in range(8)],
+    },
+)
+show("36) eight outputs -> 200", r.json())
+assert r.status_code == 200, r.text
+b = r.json()
+assert b["number_of_outputs"] == 8
+# y_k = (k+1) x，完全相关：输出相关系数矩阵应全为 1
+assert all(abs(v - 1.0) < 1e-12 for row in b["output_correlation_matrix"] for v in row)
+
+# 37) 相关矩阵非法仍走同一套校验
+r = client.post(
+    "/api/v1/propagate-joint",
+    json={
+        "inputs": [
+            {"name": "x", "value": 1, "unit": "m", "standard_uncertainty": 0.1},
+            {"name": "y", "value": 2, "unit": "m", "standard_uncertainty": 0.1},
+        ],
+        "outputs": [{"name": "s", "formula": "x+y"}, {"name": "d", "formula": "x-y"}],
+        "correlation_matrix": [[1, 1.2], [1.2, 1]],
+    },
+)
+show("37) bad correlation -> 422", r.json())
+assert r.status_code == 422
+assert r.json()["error"]["code"] == "correlation_out_of_range"
+assert r.json()["error"]["loc"] == ["correlation_matrix", 0, 1]
+
+# 38) 零不确定度输出：非对角相关系数无定义置 0，对角为 1
+r = client.post(
+    "/api/v1/propagate-joint",
+    json={
+        "inputs": [{"name": "x", "value": 1, "unit": "m", "standard_uncertainty": 0.1}],
+        "outputs": [{"name": "c", "formula": "pi*E"}, {"name": "y", "formula": "x*2"}],
+    },
+)
+show("38) zero-variance output -> off-diagonal corr 0", r.json())
+assert r.status_code == 200, r.text
+b = r.json()
+assert b["outputs"][0]["standard_uncertainty"] == 0.0
+assert b["output_correlation_matrix"] == [[1.0, 0.0], [0.0, 1.0]]
+
+# 39) 缺省相关矩阵 = 单位阵；完全负相关输入使两输出协方差为负
+r = client.post(
+    "/api/v1/propagate-joint",
+    json={
+        "inputs": [
+            {"name": "x", "value": 1, "unit": "m", "standard_uncertainty": 0.1},
+            {"name": "y", "value": 2, "unit": "m", "standard_uncertainty": 0.2},
+        ],
+        "outputs": [{"name": "s", "formula": "x+y"}, {"name": "d", "formula": "x-y"}],
+    },
+)
+show("39) default identity corr; s=x+y, d=x-y", r.json())
+assert r.status_code == 200, r.text
+b = r.json()
+# Var(s)=0.01+0.04=0.05, Var(d)=0.05, Cov(s,d)=0.01-0.04=-0.03
+cov = b["output_covariance_matrix"]
+assert abs(cov[0][0]["value"] - 0.05) < 1e-12
+assert abs(cov[0][1]["value"] - (-0.03)) < 1e-12
+assert abs(b["output_correlation_matrix"][0][1] - (-0.6)) < 1e-12
+assert cov[0][1]["unit"] == "m ** 2"
+
 print("\nALL TESTS PASSED")
